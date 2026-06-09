@@ -1,0 +1,38 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 0,
+    "tls": {"enabled": false}
+  },
+  "auth": {
+    "api_keys": [
+      {
+        "id": "test-key",
+        "tenant": "test-tenant",
+        "key": "test-secret",
+        "allowed_models": ["test-model"]
+      }
+    ]
+  },
+  "routes": [
+    {
+      "name": "stub-backend",
+      "backend": "http://127.0.0.1:1",
+      "models": ["test-model"],
+      "allowed_endpoints": [
+        {"path": "/v1/chat/completions", "methods": ["POST"]},
+        {"path": "/v1/completions", "methods": ["POST"]},
+        {"path": "/v1/embeddings", "methods": ["POST"]},
+        {"path": "/v1/models", "methods": ["GET"]}
+      ]
+    }
+  ],
+  "privacy": {"access_log": "metadata"},
+  "logging": {"color": "never"},
+  "limits": {
+    "max_request_body_bytes": 1048576,
+    "max_output_tokens": 2048,
+    "max_n": 4,
+    "timeout_seconds": 5
+  }
+}

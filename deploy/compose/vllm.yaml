@@ -1,0 +1,25 @@
+services:
+  gateway:
+    build:
+      context: ../..
+    ports:
+      - "8080:8080"
+    environment:
+      TEAM_A_API_KEY: example-team-a-key
+    depends_on:
+      - vllm
+
+  vllm:
+    image: vllm/vllm-openai:latest
+    command:
+      - --model
+      - Qwen/Qwen2.5-7B-Instruct
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --served-model-name
+      - qwen-local
+    expose:
+      - "8000"
+

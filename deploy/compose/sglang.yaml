@@ -1,0 +1,28 @@
+services:
+  gateway:
+    build:
+      context: ../..
+    ports:
+      - "8080:8080"
+    environment:
+      TEAM_A_API_KEY: example-team-a-key
+    depends_on:
+      - sglang
+
+  sglang:
+    image: lmsysorg/sglang:latest
+    command:
+      - python3
+      - -m
+      - sglang.launch_server
+      - --model-path
+      - meta-llama/Llama-3.1-8B-Instruct
+      - --host
+      - 0.0.0.0
+      - --port
+      - "30000"
+      - --served-model-name
+      - llama-local
+    expose:
+      - "30000"
+

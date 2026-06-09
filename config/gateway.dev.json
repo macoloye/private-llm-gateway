@@ -1,0 +1,58 @@
+{
+  "server": {
+    "host": "0.0.0.0",
+    "port": 8080,
+    "tls": {
+      "enabled": false,
+      "cert_file": "certs/server.crt",
+      "key_file": "certs/server.key"
+    }
+  },
+  "auth": {
+    "api_keys": [
+      {
+        "id": "team-a",
+        "tenant": "team-a",
+        "key_env": "TEAM_A_API_KEY",
+        "allowed_models": ["qwen-local", "llama-local"]
+      }
+    ]
+  },
+  "routes": [
+    {
+      "name": "vllm-local",
+      "backend": "http://vllm:8000",
+      "models": ["qwen-local"],
+      "allowed_endpoints": [
+        {"path": "/v1/chat/completions", "methods": ["POST"]},
+        {"path": "/v1/completions", "methods": ["POST"]},
+        {"path": "/v1/embeddings", "methods": ["POST"]},
+        {"path": "/v1/models", "methods": ["GET"]}
+      ]
+    },
+    {
+      "name": "sglang-local",
+      "backend": "http://sglang:30000",
+      "models": ["llama-local"],
+      "allowed_endpoints": [
+        {"path": "/v1/chat/completions", "methods": ["POST"]},
+        {"path": "/v1/completions", "methods": ["POST"]},
+        {"path": "/v1/embeddings", "methods": ["POST"]},
+        {"path": "/v1/models", "methods": ["GET"]}
+      ]
+    }
+  ],
+  "privacy": {
+    "access_log": "metadata"
+  },
+  "logging": {
+    "color": "always",
+    "file": "logs/gateway.log"
+  },
+  "limits": {
+    "max_request_body_bytes": 1048576,
+    "max_output_tokens": 2048,
+    "max_n": 4,
+    "timeout_seconds": 120
+  }
+}

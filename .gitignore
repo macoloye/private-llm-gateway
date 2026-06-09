@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+.venv/
+venv/
+certs/
+secrets/
+benchmark-results/
+logs/
+*.log
+.env
+archives/
