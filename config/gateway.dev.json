@@ -5,10 +5,25 @@
     "tls": {
       "enabled": false,
       "cert_file": "certs/server.crt",
-      "key_file": "certs/server.key"
+      "key_file": "certs/server.key",
+      "client_ca_file": "certs/dev-ca.crt",
+      "require_client_cert": false
     }
   },
   "auth": {
+    "api_key_file": "config/api-keys.local.json",
+    "admin_api_key_env": "GATEWAY_ADMIN_API_KEY",
+    "jwt": {
+      "enabled": false,
+      "issuer": "https://issuer.example.invalid",
+      "audience": "private-inference-gateway",
+      "jwks_file": "config/jwks.local.json"
+    },
+    "oidc": {
+      "enabled": false,
+      "discovery_url": "https://issuer.example.invalid/.well-known/openid-configuration",
+      "client_id": "private-inference-gateway"
+    },
     "api_keys": [
       {
         "id": "team-a",
@@ -22,6 +37,9 @@
     {
       "name": "vllm-local",
       "backend": "http://vllm:8000",
+      "tls_ca_file": "certs/dev-ca.crt",
+      "tls_cert_file": "certs/client.crt",
+      "tls_key_file": "certs/client.key",
       "models": ["qwen-local"],
       "allowed_endpoints": [
         {"path": "/v1/chat/completions", "methods": ["POST"]},
@@ -33,6 +51,9 @@
     {
       "name": "sglang-local",
       "backend": "http://sglang:30000",
+      "tls_ca_file": "certs/dev-ca.crt",
+      "tls_cert_file": "certs/client.crt",
+      "tls_key_file": "certs/client.key",
       "models": ["llama-local"],
       "allowed_endpoints": [
         {"path": "/v1/chat/completions", "methods": ["POST"]},
@@ -43,7 +64,15 @@
     }
   ],
   "privacy": {
-    "access_log": "metadata"
+    "access_log": "metadata",
+    "redact_logs": true,
+    "redact_before_forward": false
+  },
+  "redaction": {
+    "enabled": true,
+    "rules": [
+      {"name": "example_internal_ticket", "pattern": "TICKET-[0-9]+", "replacement": "[TICKET]"}
+    ]
   },
   "logging": {
     "color": "always",
@@ -53,6 +82,8 @@
     "max_request_body_bytes": 1048576,
     "max_output_tokens": 2048,
     "max_n": 4,
-    "timeout_seconds": 120
+    "timeout_seconds": 120,
+    "per_tenant_requests_per_minute": 120,
+    "per_tenant_requests_per_day": 10000
   }
 }

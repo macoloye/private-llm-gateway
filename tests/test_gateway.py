@@ -1,17 +1,26 @@
 from __future__ import annotations
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import base64
+import hashlib
+import hmac
 import http.client
 import io
 import json
+import os
 from pathlib import Path
 import tempfile
 import threading
+import time
 import unittest
 
+from gateway.auth import APIKeyStore, JWTVerifier, issue_api_key, rotate_api_key, update_api_key
 from gateway.config import parse_config
 from gateway.logging import GatewayLogger, LoggerOptions
+from gateway.metrics import MetricsRegistry
+from gateway.redaction import Redactor
 from gateway.server import make_handler
+from gateway.tracing import filter_trace_attributes
 
 
 class StubBackendHandler(BaseHTTPRequestHandler):
@@ -138,6 +147,36 @@ class GatewayTest(unittest.TestCase):
     def test_config_accepts_access_log_modes(self) -> None:
         for mode in ("off", "metadata", "all"):
             self.assertEqual(self.make_config(mode).privacy.access_log, mode)
+
+    def test_config_accepts_phase2_tls_and_limit_fields(self) -> None:
+        raw = dict(self.config_raw)
+        raw["server"] = {
+            "host": "127.0.0.1",
+            "port": 0,
+            "tls": {
+                "enabled": True,
+                "cert_file": "certs/server.crt",
+                "key_file": "certs/server.key",
+                "client_ca_file": "certs/dev-ca.crt",
+                "require_client_cert": True,
+            },
+        }
+        raw["routes"] = [
+            {
+                **self.config_raw["routes"][0],
+                "backend": "https://127.0.0.1:443",
+                "tls_ca_file": "certs/dev-ca.crt",
+                "tls_cert_file": "certs/client.crt",
+                "tls_key_file": "certs/client.key",
+            }
+        ]
+        raw["limits"] = {**self.config_raw["limits"], "per_tenant_requests_per_minute": 60, "per_tenant_requests_per_day": 1000}
+
+        config = parse_config(raw)
+
+        self.assertTrue(config.server.tls.require_client_cert)
+        self.assertEqual(config.routes[0].tls_cert_file, "certs/client.crt")
+        self.assertEqual(config.limits.per_tenant_requests_per_minute, 60)
 
     def test_config_rejects_unknown_access_log_mode(self) -> None:
         raw = dict(self.config_raw)
@@ -294,6 +333,187 @@ class GatewayTest(unittest.TestCase):
             event = json.loads(path.read_text(encoding="utf-8").strip())
             self.assertEqual(event["request_body"], '{"messages":["debug"]}')
             self.assertEqual(event["response_body"], '{"choices":[]}')
+
+    def test_dynamic_api_keys_are_hashed_reloaded_revoked_and_rotated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "keys.json"
+            first = issue_api_key(path, key_id="dynamic-a", tenant="tenant-a", allowed_models=("test-model",))
+
+            raw = path.read_text(encoding="utf-8")
+            self.assertNotIn(first, raw)
+            self.assertIn("pbkdf2_sha256", raw)
+
+            config = parse_config({**self.config_raw, "auth": {"api_key_file": str(path)}})
+            store = APIKeyStore(config.auth)
+            principal = store.authenticate(first)
+            self.assertIsNotNone(principal)
+            self.assertEqual(principal.tenant, "tenant-a")
+
+            update_api_key(path, key_id="dynamic-a", revoked=True)
+            self.assertIsNone(store.authenticate(first))
+
+            second = rotate_api_key(path, key_id="dynamic-a")
+            self.assertNotEqual(first, second)
+            self.assertIsNotNone(store.authenticate(second))
+
+    def test_admin_api_key_path_updates_keys_without_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            key_file = str(Path(tmp) / "keys.json")
+            os.environ["TEST_GATEWAY_ADMIN_KEY"] = "admin-secret"
+            raw = {
+                **self.config_raw,
+                "auth": {
+                    "api_key_file": key_file,
+                    "admin_api_key_env": "TEST_GATEWAY_ADMIN_KEY",
+                },
+            }
+            logger = GatewayLogger(LoggerOptions(color=False, stream=io.StringIO()))
+            server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(parse_config(raw), logger))
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                status, body, _ = self.request_to_port(
+                    server.server_port,
+                    "POST",
+                    "/admin/api-keys",
+                    {"action": "issue", "id": "dynamic-a", "tenant": "tenant-a", "allowed_models": ["test-model"]},
+                    key="admin-secret",
+                )
+                issued = json.loads(body)["key"]
+                self.assertEqual(status, 201)
+                self.assertNotIn(issued, Path(key_file).read_text(encoding="utf-8"))
+
+                status, _, _ = self.request_to_port(
+                    server.server_port,
+                    "POST",
+                    "/v1/chat/completions",
+                    {"model": "test-model", "messages": []},
+                    key=issued,
+                )
+                self.assertEqual(status, 200)
+
+                status, _, _ = self.request_to_port(
+                    server.server_port,
+                    "POST",
+                    "/admin/api-keys",
+                    {"action": "revoke", "id": "dynamic-a"},
+                    key="admin-secret",
+                )
+                self.assertEqual(status, 200)
+                status, _, _ = self.request_to_port(
+                    server.server_port,
+                    "POST",
+                    "/v1/chat/completions",
+                    {"model": "test-model", "messages": []},
+                    key=issued,
+                )
+                self.assertEqual(status, 401)
+            finally:
+                server.shutdown()
+                server.server_close()
+                logger.close()
+                os.environ.pop("TEST_GATEWAY_ADMIN_KEY", None)
+
+    def test_invalid_dynamic_key_file_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "keys.json"
+            key = issue_api_key(path, key_id="dynamic-a", tenant="tenant-a")
+            config = parse_config({**self.config_raw, "auth": {"api_key_file": str(path)}})
+            store = APIKeyStore(config.auth)
+            self.assertIsNotNone(store.authenticate(key))
+
+            path.write_text('{"api_keys":[{"id":"broken"}]}\n', encoding="utf-8")
+            self.assertIsNone(store.authenticate(key))
+
+    def test_jwt_validation_rejects_wrong_issuer_audience_expiry_and_unknown_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            secret = b"jwt-test-secret"
+            jwks = Path(tmp) / "jwks.json"
+            jwks.write_text(json.dumps({"keys": [{"kty": "oct", "kid": "kid-a", "k": _b64(secret)}]}), encoding="utf-8")
+            config = parse_config(
+                {
+                    **self.config_raw,
+                    "auth": {
+                        "jwt": {
+                            "enabled": True,
+                            "issuer": "issuer-a",
+                            "audience": "gateway",
+                            "jwks_file": str(jwks),
+                        }
+                    },
+                }
+            )
+            verifier = JWTVerifier(config.auth.jwt)
+            valid = _jwt(secret, "kid-a", {"iss": "issuer-a", "aud": "gateway", "exp": int(time.time()) + 60, "tenant": "team-a"})
+            self.assertEqual(verifier.verify(valid).tenant, "team-a")  # type: ignore[union-attr]
+
+            wrong_issuer = _jwt(secret, "kid-a", {"iss": "issuer-b", "aud": "gateway", "exp": int(time.time()) + 60, "tenant": "team-a"})
+            wrong_audience = _jwt(secret, "kid-a", {"iss": "issuer-a", "aud": "other", "exp": int(time.time()) + 60, "tenant": "team-a"})
+            expired = _jwt(secret, "kid-a", {"iss": "issuer-a", "aud": "gateway", "exp": int(time.time()) - 1, "tenant": "team-a"})
+            unknown_key = _jwt(secret, "kid-b", {"iss": "issuer-a", "aud": "gateway", "exp": int(time.time()) + 60, "tenant": "team-a"})
+
+            self.assertIsNone(verifier.verify(wrong_issuer))
+            self.assertIsNone(verifier.verify(wrong_audience))
+            self.assertIsNone(verifier.verify(expired))
+            self.assertIsNone(verifier.verify(unknown_key))
+
+    def test_redaction_removes_sensitive_patterns_from_logs_and_forwarding_text(self) -> None:
+        config = parse_config(
+            {
+                **self.config_raw,
+                "redaction": {"rules": [{"name": "internal", "pattern": "project-[0-9]+", "replacement": "[PROJECT]"}]},
+            }
+        )
+        redactor = Redactor(config.redaction)
+        text = "Bearer sk_abcdefghijklmnopqrstuvwxyz password=secret user@example.com 4111-1111-1111-1111 project-123"
+
+        redacted = redactor.text(text)
+
+        self.assertNotIn("sk_abcdefghijklmnopqrstuvwxyz", redacted)
+        self.assertNotIn("password=secret", redacted)
+        self.assertNotIn("user@example.com", redacted)
+        self.assertNotIn("4111-1111-1111-1111", redacted)
+        self.assertIn("[PROJECT]", redacted)
+
+    def test_trace_filter_removes_prompt_completion_and_auth_attributes(self) -> None:
+        redactor = Redactor(parse_config(self.config_raw).redaction)
+
+        filtered = filter_trace_attributes(
+            {
+                "request_body": '{"prompt":"secret"}',
+                "authorization": "Bearer sk_abcdefghijklmnopqrstuvwxyz",
+                "model": "test-model",
+                "email": "user@example.com",
+            },
+            redactor,
+        )
+
+        self.assertEqual(filtered["request_body"], "[REDACTED]")
+        self.assertEqual(filtered["authorization"], "[REDACTED]")
+        self.assertEqual(filtered["model"], "test-model")
+        self.assertEqual(filtered["email"], "[REDACTED]")
+
+    def test_metrics_use_fixed_low_cardinality_labels(self) -> None:
+        metrics = MetricsRegistry()
+        metrics.observe(route="/v1/chat/completions?prompt=secret", backend="stub backend/1", status=200, latency_ms=7)
+
+        output = metrics.prometheus().decode("utf-8")
+
+        self.assertIn('route="other"', output)
+        self.assertIn('backend="stub_backend_1"', output)
+        self.assertIn('status_family="2xx"', output)
+        self.assertNotIn("prompt=secret", output)
+
+def _b64(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def _jwt(secret: bytes, kid: str, claims: dict[str, object]) -> str:
+    header = _b64(json.dumps({"alg": "HS256", "kid": kid}, separators=(",", ":")).encode("utf-8"))
+    payload = _b64(json.dumps(claims, separators=(",", ":")).encode("utf-8"))
+    signing_input = f"{header}.{payload}".encode("ascii")
+    signature = _b64(hmac.new(secret, signing_input, hashlib.sha256).digest())
+    return f"{header}.{payload}.{signature}"
 
 
 if __name__ == "__main__":

@@ -37,24 +37,32 @@ Use it when you want applications to call one protected gateway instead of expos
 - Proxies OpenAI-compatible requests to configured backends.
 - Supports `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, and `/v1/models`.
 - Requires API-key authentication before forwarding.
+- Supports reloadable hashed API keys and JWT verification.
 - Allows only configured endpoints and denies everything else.
 - Routes requests by model name.
-- Enforces basic request limits: body size, `max_tokens`, `n`, and backend timeout.
+- Enforces request limits: body size, `max_tokens`, `n`, backend timeout, and per-tenant quotas.
 - Generates and propagates `X-Request-Id`.
 - Strips client auth headers before forwarding to the backend.
 - Supports access-log modes: `off`, `metadata`, and `all`.
-- Supports gateway TLS through config.
+- Supports gateway TLS, optional client-certificate authentication, backend HTTPS, and backend mTLS settings.
+- Exposes Prometheus metrics with fixed low-cardinality labels.
 
 It does not make an untrusted backend cryptographically blind. The backend still receives plaintext prompts.
 
 ## Status
 
-Phase 0 and Phase 1 are implemented:
+Phase 0, Phase 1, and Phase 2 are implemented:
 
 - Python stdlib gateway runtime
 - JSON config loader
 - API-key auth
+- hashed dynamic API-key management
+- JWT verification with local JWKS files
 - endpoint allowlisting
+- per-tenant rate limits and quotas
+- log redaction and optional before-forward redaction
+- Prometheus metrics
+- Kubernetes examples with private backend Services
 - vLLM and SGLang Compose examples
 - access-log modes
 - integration tests with a stub backend
@@ -171,7 +179,7 @@ Important config rules:
 - Requests to non-allowlisted paths return `403`.
 - Real secrets should not be committed.
 
-## TLS
+## TLS And mTLS
 
 Generate local development certificates:
 
@@ -181,7 +189,45 @@ scripts/pki/dev-ca.sh
 
 Then set `server.tls.enabled` to `true` and keep `cert_file` and `key_file` pointed at the generated files.
 
-mTLS is planned for Phase 2.
+For service-to-service client certificates, set:
+
+```json
+{
+  "server": {
+    "tls": {
+      "enabled": true,
+      "cert_file": "certs/server.crt",
+      "key_file": "certs/server.key",
+      "client_ca_file": "certs/dev-ca.crt",
+      "require_client_cert": true
+    }
+  }
+}
+```
+
+For gateway-to-backend HTTPS or mTLS, use an `https://` backend URL and route-level `tls_ca_file`, `tls_cert_file`, and `tls_key_file`.
+
+## API Keys And JWT
+
+Static API keys still work through `auth.api_keys`. For production, prefer `auth.api_key_file`; issued keys are stored as PBKDF2 hashes and the plaintext key is returned only once.
+
+The protected admin path is enabled when both `auth.api_key_file` and `auth.admin_api_key_env` are configured:
+
+```sh
+export GATEWAY_ADMIN_API_KEY=replace-with-admin-secret
+curl http://127.0.0.1:8080/admin/api-keys \
+  -H 'Authorization: Bearer replace-with-admin-secret' \
+  -H 'Content-Type: application/json' \
+  -d '{"action":"issue","id":"team-b","tenant":"team-b","allowed_models":["qwen-local"]}'
+```
+
+Supported actions are `issue`, `update`, `revoke`, and `rotate`. The gateway reloads the key file when it changes and rejects all dynamic keys if the file contains invalid records.
+
+JWT auth is configured with `auth.jwt.enabled`, `issuer`, `audience`, and a local JWKS file. The current stdlib verifier supports HS256 `oct` JWKS keys; OIDC discovery fields are parsed as integration hooks for deployments that resolve JWKS externally.
+
+## Metrics
+
+`GET /metrics` returns Prometheus text metrics. Labels are limited to route allowlist values, backend names, and status families; request IDs, tenants, prompts, completions, and request bodies are not metric labels.
 
 ## Logs
 
@@ -237,6 +283,7 @@ Current repository layout:
 gateway/             gateway runtime
 config/              JSON configs
 deploy/compose/      vLLM and SGLang Compose examples
+deploy/k8s/          gateway, private backend Service, and NetworkPolicy examples
 scripts/pki/         local certificate helper
 tests/               unit and integration tests
 PLAN.md              implementation plan
@@ -246,7 +293,7 @@ idea.md              research notes
 
 ## Roadmap
 
-- Phase 2: mTLS, JWT/OIDC, per-tenant rate limits, redaction middleware, Kubernetes templates, and safe metrics.
+- Phase 2: implemented dynamic API key issuance/modification/revocation, mTLS settings, JWT/OIDC hooks, per-tenant rate limits, redaction middleware, Kubernetes templates, and safe metrics.
 - Phase 3: privacy classes, tenant-to-backend routing, local-only routing, and policy validation.
 - Phase 4: service-mesh examples, confidential-computing notes, attestation experiments, signed policies, and security CI.
 

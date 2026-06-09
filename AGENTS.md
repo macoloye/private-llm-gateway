@@ -18,6 +18,7 @@ Use `PLAN.md` as the implementation source of truth and `README.md` as the produ
 - Strip or mask sensitive headers before logging and before forwarding unless a backend credential is explicitly required.
 - Keep raw vLLM, SGLang, and worker ports private in examples.
 - Do not commit secrets, example real tokens, private certificates, generated keys, or machine-specific paths.
+- API key management must store hashes or references, not plaintext keys. Plaintext keys may be displayed only once during issuance.
 
 ## Implementation Guidance
 
@@ -27,6 +28,7 @@ Use `PLAN.md` as the implementation source of truth and `README.md` as the produ
 - Fail closed on invalid config, unknown backends, unknown privacy classes, missing auth bindings, and malformed policies.
 - Keep local examples runnable before adding production overlays.
 - Add tests for security-sensitive behavior whenever changing auth, routing, redaction, logging, metrics, or deployment templates.
+- Dynamic auth updates must be tested without requiring a gateway restart.
 - Avoid adding dependencies for simple middleware unless they materially reduce risk or complexity.
 
 ## Documentation Rules

@@ -11,8 +11,12 @@ import time
 from typing import Any
 from urllib.parse import urlparse
 
-from gateway.config import APIKey, GatewayConfig, RouteConfig
+from gateway.auth import APIKeyStore, JWTVerifier, Principal, issue_api_key, rotate_api_key, update_api_key
+from gateway.config import GatewayConfig, RouteConfig
 from gateway.logging import GatewayLogger, LoggerOptions, color_enabled
+from gateway.metrics import MetricsRegistry
+from gateway.rate_limit import TenantRateLimiter
+from gateway.redaction import Redactor
 
 SENSITIVE_REQUEST_HEADERS = {
     "authorization",
@@ -45,6 +49,10 @@ def run_gateway(config: GatewayConfig, logger: GatewayLogger | None = None) -> N
     if config.server.tls.enabled:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         context.load_cert_chain(config.server.tls.cert_file, config.server.tls.key_file)
+        if config.server.tls.client_ca_file:
+            context.load_verify_locations(config.server.tls.client_ca_file)
+        if config.server.tls.require_client_cert:
+            context.verify_mode = ssl.CERT_REQUIRED
         server.socket = context.wrap_socket(server.socket, server_side=True)
 
     scheme = "https" if config.server.tls.enabled else "http"
@@ -59,6 +67,14 @@ def run_gateway(config: GatewayConfig, logger: GatewayLogger | None = None) -> N
 
 def make_handler(config: GatewayConfig, logger: GatewayLogger | None = None) -> type[BaseHTTPRequestHandler]:
     logger = logger or GatewayLogger(LoggerOptions(color=False))
+    key_store = APIKeyStore(config.auth)
+    jwt_verifier = JWTVerifier(config.auth.jwt)
+    redactor = Redactor(config.redaction)
+    limiter = TenantRateLimiter(
+        per_minute=config.limits.per_tenant_requests_per_minute,
+        per_day=config.limits.per_tenant_requests_per_day,
+    )
+    metrics = MetricsRegistry()
 
     class GatewayHandler(BaseHTTPRequestHandler):
         server_version = "PrivateInferenceGateway/0.1"
@@ -89,6 +105,13 @@ def make_handler(config: GatewayConfig, logger: GatewayLogger | None = None) -> 
                     status = HTTPStatus.OK
                     self._write_json(status, {"status": "ok", "request_id": request_id}, request_id)
                     return
+                if urlparse(self.path).path == "/metrics" and self.command == "GET":
+                    status = HTTPStatus.OK
+                    self._write_metrics(metrics.prometheus(), request_id)
+                    return
+                if urlparse(self.path).path == "/admin/api-keys":
+                    status = self._handle_admin_api_keys(request_id)
+                    return
 
                 body = self._read_body()
                 payload = self._parse_json_body(body)
@@ -102,16 +125,20 @@ def make_handler(config: GatewayConfig, logger: GatewayLogger | None = None) -> 
                     self._write_json(status, {"error": {"message": "endpoint is not allowed"}}, request_id)
                     return
 
-                api_key = self._authenticate()
-                if api_key is None:
+                principal = self._authenticate()
+                if principal is None:
                     status = HTTPStatus.UNAUTHORIZED
-                    self._write_json(status, {"error": {"message": "missing or invalid API key"}}, request_id)
+                    self._write_json(status, {"error": {"message": "missing or invalid API key or token"}}, request_id)
                     return
-                tenant = api_key.tenant
+                tenant = principal.tenant
 
-                if model and api_key.allowed_models and model not in api_key.allowed_models:
+                if model and principal.allowed_models and model not in principal.allowed_models:
                     status = HTTPStatus.FORBIDDEN
                     self._write_json(status, {"error": {"message": "model is not allowed for tenant"}}, request_id)
+                    return
+                if not limiter.allow(tenant):
+                    status = HTTPStatus.TOO_MANY_REQUESTS
+                    self._write_json(status, {"error": {"message": "tenant rate limit exceeded"}}, request_id)
                     return
 
                 limit_error = self._validate_limits(payload, len(body))
@@ -120,7 +147,8 @@ def make_handler(config: GatewayConfig, logger: GatewayLogger | None = None) -> 
                     self._write_json(status, {"error": {"message": limit_error}}, request_id)
                     return
 
-                response_status, response_headers, response_body = self._forward(route, body, request_id)
+                forward_body = redactor.bytes(body) if config.privacy.redact_before_forward else body
+                response_status, response_headers, response_body = self._forward(route, forward_body, request_id)
                 status = HTTPStatus(response_status)
                 input_tokens, output_tokens = _usage_from_response(response_body)
                 self._write_backend_response(response_status, response_headers, response_body, request_id)
@@ -154,9 +182,15 @@ def make_handler(config: GatewayConfig, logger: GatewayLogger | None = None) -> 
                         "output_tokens": output_tokens,
                     }
                     if config.privacy.access_log == "all":
-                        fields["request_body"] = _safe_body_text(body)
-                        fields["response_body"] = _safe_body_text(response_body or b"")
+                        request_text = _safe_body_text(body)
+                        response_text = _safe_body_text(response_body or b"")
+                        if config.privacy.redact_logs:
+                            request_text = redactor.text(request_text)
+                            response_text = redactor.text(response_text)
+                        fields["request_body"] = request_text
+                        fields["response_body"] = response_text
                     logger.access(**fields)
+                metrics.observe(route=self.path, backend=backend_name, status=int(status), latency_ms=latency_ms)
 
         def _read_body(self) -> bytes:
             content_length = int(self.headers.get("Content-Length", "0") or "0")
@@ -187,14 +221,66 @@ def make_handler(config: GatewayConfig, logger: GatewayLogger | None = None) -> 
             path = urlparse(self.path).path
             return any(endpoint.path == path and self.command in endpoint.methods for endpoint in route.allowed_endpoints)
 
-        def _authenticate(self) -> APIKey | None:
+        def _authenticate(self) -> Principal | None:
             supplied = _extract_api_key(self.headers.get("Authorization"), self.headers.get("X-Api-Key"))
-            if not supplied:
-                return None
-            for api_key in config.auth.api_keys:
-                if secrets.compare_digest(supplied, api_key.secret):
-                    return api_key
+            if supplied:
+                principal = key_store.authenticate(supplied)
+                if principal:
+                    return principal
+            token = _extract_bearer(self.headers.get("Authorization"))
+            if token:
+                return jwt_verifier.verify(token)
             return None
+
+        def _is_admin_authenticated(self) -> bool:
+            expected = os.environ.get(config.auth.admin_api_key_env or "")
+            supplied = _extract_api_key(self.headers.get("Authorization"), self.headers.get("X-Api-Key"))
+            return bool(expected and supplied and secrets.compare_digest(expected, supplied))
+
+        def _handle_admin_api_keys(self, request_id: str) -> HTTPStatus:
+            if not config.auth.api_key_file or not config.auth.admin_api_key_env:
+                self._write_json(HTTPStatus.NOT_FOUND, {"error": {"message": "admin API key management is disabled"}}, request_id)
+                return HTTPStatus.NOT_FOUND
+            if not self._is_admin_authenticated():
+                self._write_json(HTTPStatus.UNAUTHORIZED, {"error": {"message": "missing or invalid admin credentials"}}, request_id)
+                return HTTPStatus.UNAUTHORIZED
+            if self.command != "POST":
+                self._write_json(HTTPStatus.METHOD_NOT_ALLOWED, {"error": {"message": "method is not allowed"}}, request_id)
+                return HTTPStatus.METHOD_NOT_ALLOWED
+            try:
+                payload = self._parse_json_body(self._read_body())
+                action = str(payload.get("action", "")).strip()
+                key_id = str(payload.get("id", "")).strip()
+                if action == "issue":
+                    plaintext = issue_api_key(
+                        config.auth.api_key_file,
+                        key_id=key_id,
+                        tenant=str(payload.get("tenant", key_id)),
+                        allowed_models=tuple(str(item) for item in payload.get("allowed_models", [])),
+                    )
+                    self._write_json(HTTPStatus.CREATED, {"id": key_id, "key": plaintext}, request_id)
+                    return HTTPStatus.CREATED
+                if action == "rotate":
+                    plaintext = rotate_api_key(config.auth.api_key_file, key_id=key_id)
+                    self._write_json(HTTPStatus.OK, {"id": key_id, "key": plaintext}, request_id)
+                    return HTTPStatus.OK
+                if action in {"update", "revoke"}:
+                    update_api_key(
+                        config.auth.api_key_file,
+                        key_id=key_id,
+                        tenant=payload.get("tenant"),
+                        allowed_models=tuple(str(item) for item in payload["allowed_models"])
+                        if "allowed_models" in payload
+                        else None,
+                        revoked=True if action == "revoke" else payload.get("revoked"),
+                    )
+                    self._write_json(HTTPStatus.OK, {"id": key_id, "status": "updated"}, request_id)
+                    return HTTPStatus.OK
+                self._write_json(HTTPStatus.BAD_REQUEST, {"error": {"message": "unsupported key management action"}}, request_id)
+                return HTTPStatus.BAD_REQUEST
+            except (ValueError, OSError, KeyError) as exc:
+                self._write_json(HTTPStatus.BAD_REQUEST, {"error": {"message": str(exc)}}, request_id)
+                return HTTPStatus.BAD_REQUEST
 
         def _validate_limits(self, payload: dict[str, Any], body_size: int) -> str | None:
             if body_size > config.limits.max_request_body_bytes:
@@ -211,7 +297,11 @@ def make_handler(config: GatewayConfig, logger: GatewayLogger | None = None) -> 
             parsed = urlparse(route.backend)
             connection_cls = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
             port = parsed.port
-            connection = connection_cls(parsed.hostname, port, timeout=config.limits.timeout_seconds)
+            if parsed.scheme == "https":
+                context = _backend_ssl_context(route)
+                connection = connection_cls(parsed.hostname, port, timeout=config.limits.timeout_seconds, context=context)
+            else:
+                connection = connection_cls(parsed.hostname, port, timeout=config.limits.timeout_seconds)
             path = _join_backend_path(parsed.path, self.path)
             headers = _forward_headers(self.headers, request_id)
             if route.backend_api_key_env:
@@ -229,6 +319,14 @@ def make_handler(config: GatewayConfig, logger: GatewayLogger | None = None) -> 
             body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
             self.send_response(int(status))
             self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("X-Request-Id", request_id)
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _write_metrics(self, body: bytes, request_id: str) -> None:
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/plain; version=0.0.4")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("X-Request-Id", request_id)
             self.end_headers()
@@ -275,6 +373,22 @@ def _extract_api_key(authorization: str | None, x_api_key: str | None) -> str | 
     if x_api_key:
         return x_api_key.strip()
     return None
+
+
+def _extract_bearer(authorization: str | None) -> str | None:
+    if not authorization:
+        return None
+    parts = authorization.strip().split(None, 1)
+    if len(parts) == 2 and parts[0].lower() == "bearer":
+        return parts[1]
+    return None
+
+
+def _backend_ssl_context(route: RouteConfig) -> ssl.SSLContext:
+    context = ssl.create_default_context(cafile=route.tls_ca_file)
+    if route.tls_cert_file and route.tls_key_file:
+        context.load_cert_chain(route.tls_cert_file, route.tls_key_file)
+    return context
 
 
 def _forward_headers(headers: Any, request_id: str) -> dict[str, str]:

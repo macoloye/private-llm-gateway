@@ -22,8 +22,20 @@ openssl x509 -req -in "$OUT_DIR/server.csr" \
   -days 365 \
   -sha256
 
-rm -f "$OUT_DIR/server.csr" "$OUT_DIR/dev-ca.srl"
+openssl req -newkey rsa:2048 -nodes \
+  -keyout "$OUT_DIR/client.key" \
+  -out "$OUT_DIR/client.csr" \
+  -subj "/CN=private-inference-gateway-client"
+
+openssl x509 -req -in "$OUT_DIR/client.csr" \
+  -CA "$OUT_DIR/dev-ca.crt" \
+  -CAkey "$OUT_DIR/dev-ca.key" \
+  -CAcreateserial \
+  -out "$OUT_DIR/client.crt" \
+  -days 365 \
+  -sha256
+
+rm -f "$OUT_DIR/server.csr" "$OUT_DIR/client.csr" "$OUT_DIR/dev-ca.srl"
 chmod 600 "$OUT_DIR"/*.key
 
 echo "wrote development certificates to $OUT_DIR"
-
