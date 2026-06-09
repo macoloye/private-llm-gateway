@@ -75,10 +75,12 @@ class RouteConfig:
     backend: str
     models: tuple[str, ...]
     allowed_endpoints: tuple[AllowedEndpoint, ...]
+    local: bool = True
     backend_api_key_env: str | None = None
     tls_ca_file: str | None = None
     tls_cert_file: str | None = None
     tls_key_file: str | None = None
+    redact_before_forward: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -86,6 +88,53 @@ class PrivacyConfig:
     access_log: str = "metadata"
     redact_logs: bool = True
     redact_before_forward: bool = False
+    audit_log_file: str | None = None
+    audit_retention_days: int = 30
+
+
+@dataclass(frozen=True)
+class PrivacyClassPolicy:
+    name: str
+    redact_before_forward: bool | None = None
+
+
+@dataclass(frozen=True)
+class TenantPolicy:
+    tenant: str
+    allowed_models: tuple[str, ...]
+    allowed_backends: tuple[str, ...]
+    privacy_classes: tuple[str, ...] = ("standard",)
+    redact_before_forward: bool | None = None
+
+
+@dataclass(frozen=True)
+class RoutingPolicyRule:
+    tenant: str
+    model: str
+    privacy_class: str
+    backend: str
+    redact_before_forward: bool | None = None
+
+
+@dataclass(frozen=True)
+class RedactBeforeForwardPolicy:
+    tenants: tuple[str, ...] = ()
+    routes: tuple[str, ...] = ()
+    privacy_classes: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class PolicyConfig:
+    enabled: bool = False
+    default_privacy_class: str = "standard"
+    privacy_classes: tuple[PrivacyClassPolicy, ...] = (
+        PrivacyClassPolicy("standard"),
+        PrivacyClassPolicy("sensitive"),
+        PrivacyClassPolicy("restricted"),
+    )
+    tenants: tuple[TenantPolicy, ...] = ()
+    routing_rules: tuple[RoutingPolicyRule, ...] = ()
+    redact_before_forward: RedactBeforeForwardPolicy = field(default_factory=RedactBeforeForwardPolicy)
 
 
 @dataclass(frozen=True)
@@ -125,6 +174,7 @@ class GatewayConfig:
     privacy: PrivacyConfig
     redaction: RedactionConfig
     limits: LimitsConfig
+    policy: PolicyConfig = field(default_factory=PolicyConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
 
 
@@ -187,6 +237,8 @@ def parse_config(raw: dict[str, Any]) -> GatewayConfig:
         access_log=access_log,
         redact_logs=bool(privacy_raw.get("redact_logs", True)),
         redact_before_forward=bool(privacy_raw.get("redact_before_forward", False)),
+        audit_log_file=privacy_raw.get("audit_log_file"),
+        audit_retention_days=_positive_int(privacy_raw.get("audit_retention_days", 30), "privacy.audit_retention_days"),
     )
 
     redaction_raw = raw.get("redaction", {})
@@ -215,6 +267,8 @@ def parse_config(raw: dict[str, Any]) -> GatewayConfig:
         raise ConfigError("logging.color must be one of: auto, always, never")
     logging = LoggingConfig(color=color, file=logging_raw.get("file"))
 
+    policy = _parse_policy(raw.get("policy", {}), auth, routes)
+
     return GatewayConfig(
         server=server,
         auth=auth,
@@ -222,6 +276,7 @@ def parse_config(raw: dict[str, Any]) -> GatewayConfig:
         privacy=privacy,
         redaction=redaction,
         limits=limits,
+        policy=policy,
         logging=logging,
     )
 
@@ -306,10 +361,12 @@ def _parse_route(raw: dict[str, Any]) -> RouteConfig:
         backend=backend.rstrip("/"),
         models=models,
         allowed_endpoints=endpoints,
+        local=bool(raw.get("local", True)),
         backend_api_key_env=raw.get("backend_api_key_env"),
         tls_ca_file=raw.get("tls_ca_file"),
         tls_cert_file=raw.get("tls_cert_file"),
         tls_key_file=raw.get("tls_key_file"),
+        redact_before_forward=raw.get("redact_before_forward"),
     )
 
 
@@ -321,6 +378,149 @@ def _parse_endpoint(raw: dict[str, Any]) -> AllowedEndpoint:
     if not methods:
         raise ConfigError(f"allowed endpoint {path} requires methods")
     return AllowedEndpoint(path=path, methods=methods)
+
+
+def _parse_policy(raw: dict[str, Any], auth: AuthConfig, routes: tuple[RouteConfig, ...]) -> PolicyConfig:
+    if not raw:
+        return PolicyConfig()
+
+    privacy_classes = tuple(_parse_privacy_class(item) for item in raw.get("privacy_classes", []))
+    if not privacy_classes:
+        privacy_classes = PolicyConfig().privacy_classes
+    class_names = {item.name for item in privacy_classes}
+    if class_names != {"standard", "sensitive", "restricted"}:
+        raise ConfigError("policy.privacy_classes must define exactly: standard, sensitive, restricted")
+
+    default_privacy_class = str(raw.get("default_privacy_class", "standard")).strip()
+    if default_privacy_class not in class_names:
+        raise ConfigError(f"policy.default_privacy_class references unknown privacy class: {default_privacy_class}")
+
+    tenants = tuple(_parse_tenant_policy(item) for item in raw.get("tenants", []))
+    rules = tuple(_parse_routing_rule(item) for item in raw.get("routing_rules", raw.get("routes", [])))
+    redact_policy = _parse_redact_before_forward_policy(raw.get("redact_before_forward", {}))
+    policy = PolicyConfig(
+        enabled=True,
+        default_privacy_class=default_privacy_class,
+        privacy_classes=privacy_classes,
+        tenants=tenants,
+        routing_rules=rules,
+        redact_before_forward=redact_policy,
+    )
+    _validate_policy(policy, auth, routes)
+    return policy
+
+
+def _parse_privacy_class(raw: dict[str, Any] | str) -> PrivacyClassPolicy:
+    if isinstance(raw, str):
+        name = raw.strip()
+        redact = None
+    else:
+        name = str(raw.get("name", "")).strip()
+        redact = raw.get("redact_before_forward")
+    if name not in {"standard", "sensitive", "restricted"}:
+        raise ConfigError(f"unknown privacy class: {name}")
+    return PrivacyClassPolicy(name=name, redact_before_forward=redact)
+
+
+def _parse_tenant_policy(raw: dict[str, Any]) -> TenantPolicy:
+    tenant = str(raw.get("tenant", "")).strip()
+    if not tenant:
+        raise ConfigError("policy.tenants[].tenant is required")
+    return TenantPolicy(
+        tenant=tenant,
+        allowed_models=tuple(str(item) for item in raw.get("allowed_models", [])),
+        allowed_backends=tuple(str(item) for item in raw.get("allowed_backends", [])),
+        privacy_classes=tuple(str(item) for item in raw.get("privacy_classes", ["standard"])),
+        redact_before_forward=raw.get("redact_before_forward"),
+    )
+
+
+def _parse_routing_rule(raw: dict[str, Any]) -> RoutingPolicyRule:
+    tenant = str(raw.get("tenant", "")).strip()
+    model = str(raw.get("model", "")).strip()
+    privacy_class = str(raw.get("privacy_class", "")).strip()
+    backend = str(raw.get("backend", "")).strip()
+    if not tenant or not model or not privacy_class or not backend:
+        raise ConfigError("policy.routing_rules[] requires tenant, model, privacy_class, and backend")
+    return RoutingPolicyRule(
+        tenant=tenant,
+        model=model,
+        privacy_class=privacy_class,
+        backend=backend,
+        redact_before_forward=raw.get("redact_before_forward"),
+    )
+
+
+def _parse_redact_before_forward_policy(raw: dict[str, Any] | bool) -> RedactBeforeForwardPolicy:
+    if isinstance(raw, bool):
+        return RedactBeforeForwardPolicy(privacy_classes=("standard", "sensitive", "restricted") if raw else ())
+    return RedactBeforeForwardPolicy(
+        tenants=tuple(str(item) for item in raw.get("tenants", [])),
+        routes=tuple(str(item) for item in raw.get("routes", [])),
+        privacy_classes=tuple(str(item) for item in raw.get("privacy_classes", [])),
+    )
+
+
+def _validate_policy(policy: PolicyConfig, auth: AuthConfig, routes: tuple[RouteConfig, ...]) -> None:
+    backends = {route.name: route for route in routes}
+    all_models = {model for route in routes for model in route.models}
+    class_names = {item.name for item in policy.privacy_classes}
+    tenant_map = {tenant.tenant: tenant for tenant in policy.tenants}
+    auth_tenants = {api_key.tenant for api_key in auth.api_keys}
+
+    if len(tenant_map) != len(policy.tenants):
+        raise ConfigError("policy.tenants contains duplicate tenant entries")
+    if not policy.tenants:
+        raise ConfigError("policy.tenants must contain at least one tenant when policy is configured")
+    if auth_tenants and (missing := auth_tenants - set(tenant_map)):
+        raise ConfigError(f"policy is missing tenant auth bindings for: {sorted(missing)}")
+    if not auth.api_key_file and not auth.jwt.enabled and (missing := set(tenant_map) - auth_tenants):
+        raise ConfigError(f"policy tenants have no auth bindings: {sorted(missing)}")
+
+    for tenant in policy.tenants:
+        if not tenant.allowed_models:
+            raise ConfigError(f"policy tenant {tenant.tenant} requires allowed_models")
+        if not tenant.allowed_backends:
+            raise ConfigError(f"policy tenant {tenant.tenant} requires allowed_backends")
+        unknown_models = set(tenant.allowed_models) - all_models
+        if unknown_models:
+            raise ConfigError(f"policy tenant {tenant.tenant} references unknown models: {sorted(unknown_models)}")
+        unknown_backends = set(tenant.allowed_backends) - set(backends)
+        if unknown_backends:
+            raise ConfigError(f"policy tenant {tenant.tenant} references unknown backend names: {sorted(unknown_backends)}")
+        unknown_classes = set(tenant.privacy_classes) - class_names
+        if unknown_classes:
+            raise ConfigError(f"policy tenant {tenant.tenant} references unknown privacy classes: {sorted(unknown_classes)}")
+    for name in (*policy.redact_before_forward.tenants,):
+        if name not in tenant_map:
+            raise ConfigError(f"policy.redact_before_forward.tenants references unknown tenant: {name}")
+    for name in policy.redact_before_forward.routes:
+        if name not in backends:
+            raise ConfigError(f"policy.redact_before_forward.routes references unknown backend name: {name}")
+    for name in policy.redact_before_forward.privacy_classes:
+        if name not in class_names:
+            raise ConfigError(f"policy.redact_before_forward.privacy_classes references unknown privacy class: {name}")
+
+    seen_rules: set[tuple[str, str, str]] = set()
+    for rule in policy.routing_rules:
+        key = (rule.tenant, rule.model, rule.privacy_class)
+        if key in seen_rules:
+            raise ConfigError(f"duplicate policy route rule for tenant={rule.tenant} model={rule.model} privacy_class={rule.privacy_class}")
+        seen_rules.add(key)
+        if rule.tenant not in tenant_map:
+            raise ConfigError(f"policy route rule references unknown tenant: {rule.tenant}")
+        if rule.backend not in backends:
+            raise ConfigError(f"policy route rule references unknown backend name: {rule.backend}")
+        if rule.privacy_class not in class_names:
+            raise ConfigError(f"policy route rule references unknown privacy class: {rule.privacy_class}")
+        tenant = tenant_map[rule.tenant]
+        backend = backends[rule.backend]
+        if rule.model not in tenant.allowed_models or rule.model not in backend.models:
+            raise ConfigError(f"impossible policy route rule for tenant={rule.tenant} model={rule.model} backend={rule.backend}")
+        if rule.backend not in tenant.allowed_backends or rule.privacy_class not in tenant.privacy_classes:
+            raise ConfigError(f"policy route rule is outside tenant {rule.tenant} allowlist")
+        if rule.privacy_class in {"sensitive", "restricted"} and not backend.local:
+            raise ConfigError(f"policy route rule cannot send {rule.privacy_class} traffic to external backend {rule.backend}")
 
 
 def _positive_int(value: Any, name: str) -> int:

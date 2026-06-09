@@ -64,6 +64,7 @@ class GatewayLogger:
         backend = fields.get("backend", "-")
         latency = fields.get("latency_ms", "-")
         model = fields.get("model", "-")
+        privacy_class = fields.get("privacy_class", "-")
         tokens = ""
         if "input_tokens" in fields or "output_tokens" in fields:
             tokens = f" tokens={fields.get('input_tokens', '-')}/{fields.get('output_tokens', '-')}"
@@ -73,7 +74,7 @@ class GatewayLogger:
         return (
             f"{self._tag('ACCESS', BLUE)} {status_text} "
             f"id={request_id} tenant={tenant} route={route} "
-            f"backend={backend} model={model} latency={latency}ms{tokens}{body_fields}"
+            f"backend={backend} model={model} privacy_class={privacy_class} latency={latency}ms{tokens}{body_fields}"
         )
 
     def _tag(self, value: str, color: str) -> str:

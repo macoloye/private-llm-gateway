@@ -14,6 +14,16 @@ def main(argv: list[str] | None = None) -> int:
         description="Run Private Inference Gateway.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
+    subparsers = parser.add_subparsers(dest="command")
+    validate_parser = subparsers.add_parser(
+        "validate-policy",
+        help="Validate gateway configuration and privacy-aware routing policy.",
+    )
+    validate_parser.add_argument(
+        "--config",
+        default="config/gateway.dev.json",
+        help="Path to gateway JSON config.",
+    )
     parser.add_argument(
         "--config",
         default="config/gateway.dev.json",
@@ -36,6 +46,12 @@ def main(argv: list[str] | None = None) -> int:
         logger = GatewayLogger(LoggerOptions(color=color_enabled("always")))
         logger.error(f"configuration error: {exc}")
         return 2
+
+    if args.command == "validate-policy":
+        logger = GatewayLogger(LoggerOptions(color=color_enabled("always")))
+        status = "enabled" if config.policy.enabled else "not configured"
+        logger.info(f"policy validation passed; privacy-aware routing is {status}")
+        return 0
 
     if args.log_file or args.color:
         config = replace(

@@ -12,9 +12,11 @@ from typing import Any
 from urllib.parse import urlparse
 
 from gateway.auth import APIKeyStore, JWTVerifier, Principal, issue_api_key, rotate_api_key, update_api_key
+from gateway.audit import AuditLogger
 from gateway.config import GatewayConfig, RouteConfig
 from gateway.logging import GatewayLogger, LoggerOptions, color_enabled
 from gateway.metrics import MetricsRegistry
+from gateway.policy import PolicyDenied, PolicyResolver
 from gateway.rate_limit import TenantRateLimiter
 from gateway.redaction import Redactor
 
@@ -70,6 +72,8 @@ def make_handler(config: GatewayConfig, logger: GatewayLogger | None = None) -> 
     key_store = APIKeyStore(config.auth)
     jwt_verifier = JWTVerifier(config.auth.jwt)
     redactor = Redactor(config.redaction)
+    policy_resolver = PolicyResolver(config)
+    audit = AuditLogger(config.privacy.audit_log_file, config.privacy.audit_retention_days)
     limiter = TenantRateLimiter(
         per_minute=config.limits.per_tenant_requests_per_minute,
         per_day=config.limits.per_tenant_requests_per_day,
@@ -94,6 +98,7 @@ def make_handler(config: GatewayConfig, logger: GatewayLogger | None = None) -> 
             tenant = "-"
             backend_name = "-"
             model = "-"
+            privacy_class = config.policy.default_privacy_class
             status = HTTPStatus.INTERNAL_SERVER_ERROR
             input_tokens = None
             output_tokens = None
@@ -117,20 +122,24 @@ def make_handler(config: GatewayConfig, logger: GatewayLogger | None = None) -> 
                 payload = self._parse_json_body(body)
                 model = str(payload.get("model", ""))
 
-                route = self._select_route(model)
-                backend_name = route.name
-
-                if not self._is_endpoint_allowed(route):
-                    status = HTTPStatus.FORBIDDEN
-                    self._write_json(status, {"error": {"message": "endpoint is not allowed"}}, request_id)
-                    return
-
                 principal = self._authenticate()
                 if principal is None:
                     status = HTTPStatus.UNAUTHORIZED
                     self._write_json(status, {"error": {"message": "missing or invalid API key or token"}}, request_id)
                     return
                 tenant = principal.tenant
+                privacy_class = policy_resolver.privacy_class_for_payload(payload, self.headers.get("X-Privacy-Class"))
+                if self.command == "GET" and urlparse(self.path).path == "/v1/models":
+                    decision = policy_resolver.route_for_models_endpoint(tenant, privacy_class)
+                else:
+                    decision = policy_resolver.resolve(tenant=tenant, model=model, privacy_class=privacy_class)
+                route = decision.route
+                backend_name = route.name
+
+                if not self._is_endpoint_allowed(route):
+                    status = HTTPStatus.FORBIDDEN
+                    self._write_json(status, {"error": {"message": "endpoint is not allowed"}}, request_id)
+                    return
 
                 if model and principal.allowed_models and model not in principal.allowed_models:
                     status = HTTPStatus.FORBIDDEN
@@ -147,7 +156,7 @@ def make_handler(config: GatewayConfig, logger: GatewayLogger | None = None) -> 
                     self._write_json(status, {"error": {"message": limit_error}}, request_id)
                     return
 
-                forward_body = redactor.bytes(body) if config.privacy.redact_before_forward else body
+                forward_body = redactor.bytes(body) if decision.redact_before_forward else body
                 response_status, response_headers, response_body = self._forward(route, forward_body, request_id)
                 status = HTTPStatus(response_status)
                 input_tokens, output_tokens = _usage_from_response(response_body)
@@ -158,9 +167,9 @@ def make_handler(config: GatewayConfig, logger: GatewayLogger | None = None) -> 
             except BadJSON:
                 status = HTTPStatus.BAD_REQUEST
                 self._write_json(status, {"error": {"message": "request body must be JSON"}}, request_id)
-            except NoRoute:
-                status = HTTPStatus.BAD_REQUEST
-                self._write_json(status, {"error": {"message": "no backend route for requested model"}}, request_id)
+            except PolicyDenied as exc:
+                status = HTTPStatus.FORBIDDEN
+                self._write_json(status, {"error": {"message": str(exc)}}, request_id)
             except TimeoutError:
                 status = HTTPStatus.GATEWAY_TIMEOUT
                 self._write_json(status, {"error": {"message": "backend request timed out"}}, request_id)
@@ -176,6 +185,7 @@ def make_handler(config: GatewayConfig, logger: GatewayLogger | None = None) -> 
                         "route": self.path,
                         "backend": backend_name,
                         "model": model,
+                        "privacy_class": privacy_class,
                         "status": int(status),
                         "latency_ms": latency_ms,
                         "input_tokens": input_tokens,
@@ -190,6 +200,16 @@ def make_handler(config: GatewayConfig, logger: GatewayLogger | None = None) -> 
                         fields["request_body"] = request_text
                         fields["response_body"] = response_text
                     logger.access(**fields)
+                audit.write(
+                    request_id=request_id,
+                    tenant=tenant,
+                    route=self.path,
+                    backend=backend_name,
+                    model=model,
+                    privacy_class=privacy_class,
+                    status=int(status),
+                    latency_ms=latency_ms,
+                )
                 metrics.observe(route=self.path, backend=backend_name, status=int(status), latency_ms=latency_ms)
 
         def _read_body(self) -> bytes:
@@ -208,14 +228,6 @@ def make_handler(config: GatewayConfig, logger: GatewayLogger | None = None) -> 
             if not isinstance(parsed, dict):
                 raise BadJSON
             return parsed
-
-        def _select_route(self, model: str) -> RouteConfig:
-            if self.command == "GET" and self.path == "/v1/models":
-                return config.routes[0]
-            for route in config.routes:
-                if model in route.models:
-                    return route
-            raise NoRoute
 
         def _is_endpoint_allowed(self, route: RouteConfig) -> bool:
             path = urlparse(self.path).path
@@ -308,12 +320,14 @@ def make_handler(config: GatewayConfig, logger: GatewayLogger | None = None) -> 
                 backend_key = os.environ.get(route.backend_api_key_env)
                 if backend_key:
                     headers["Authorization"] = f"Bearer {backend_key}"
-            connection.request(self.command, path, body=body if self.command != "GET" else None, headers=headers)
-            response = connection.getresponse()
-            response_body = response.read()
-            response_headers = {key: value for key, value in response.getheaders()}
-            connection.close()
-            return response.status, response_headers, response_body
+            try:
+                connection.request(self.command, path, body=body if self.command != "GET" else None, headers=headers)
+                response = connection.getresponse()
+                response_body = response.read()
+                response_headers = {key: value for key, value in response.getheaders()}
+                return response.status, response_headers, response_body
+            finally:
+                connection.close()
 
         def _write_json(self, status: int | HTTPStatus, payload: dict[str, Any], request_id: str) -> None:
             body = json.dumps(payload, separators=(",", ":")).encode("utf-8")

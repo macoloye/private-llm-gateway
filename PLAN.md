@@ -147,6 +147,8 @@ Acceptance criteria:
 
 ## Phase 3: Privacy-Aware Routing
 
+Status: implemented.
+
 Goal: make privacy class a first-class policy dimension.
 
 Build:
@@ -187,20 +189,6 @@ Acceptance criteria:
 - Benchmarks report TTFT, end-to-end latency, output throughput, gateway CPU overhead, memory overhead, streaming overhead, TLS handshake overhead, and warm-connection impact.
 - CI fails on committed high-confidence secrets.
 - CI reports container scan results for published example images.
-
-## Suggested First Implementation Slice
-
-1. Choose the runtime stack and document it in `README.md`.
-2. Add dependency setup, linting, tests, and config validation.
-3. Add a minimal gateway service with health check and config loading.
-4. Add endpoint allowlisting.
-5. Add API-key auth.
-6. Add one vLLM adapter and one SGLang adapter.
-7. Add no-log metadata logging.
-8. Add Compose examples.
-9. Add integration tests using a stub OpenAI-compatible backend.
-
-This slice should be small enough to review as the first real pull request while still proving the core privacy posture.
 
 ## Consistency Rules
 

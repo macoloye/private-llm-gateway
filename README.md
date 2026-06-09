@@ -39,19 +39,22 @@ Use it when you want applications to call one protected gateway instead of expos
 - Requires API-key authentication before forwarding.
 - Supports reloadable hashed API keys and JWT verification.
 - Allows only configured endpoints and denies everything else.
-- Routes requests by model name.
+- Routes requests by tenant, model, and privacy class.
+- Supports privacy classes: `standard`, `sensitive`, and `restricted`.
+- Blocks `sensitive` and `restricted` traffic from external backends, and keeps `restricted` traffic local-only.
 - Enforces request limits: body size, `max_tokens`, `n`, backend timeout, and per-tenant quotas.
 - Generates and propagates `X-Request-Id`.
 - Strips client auth headers before forwarding to the backend.
 - Supports access-log modes: `off`, `metadata`, and `all`.
 - Supports gateway TLS, optional client-certificate authentication, backend HTTPS, and backend mTLS settings.
 - Exposes Prometheus metrics with fixed low-cardinality labels.
+- Writes optional metadata-only audit logs with configurable retention.
 
 It does not make an untrusted backend cryptographically blind. The backend still receives plaintext prompts.
 
 ## Status
 
-Phase 0, Phase 1, and Phase 2 are implemented:
+Phase 0, Phase 1, Phase 2, and Phase 3 are implemented:
 
 - Python stdlib gateway runtime
 - JSON config loader
@@ -62,6 +65,8 @@ Phase 0, Phase 1, and Phase 2 are implemented:
 - per-tenant rate limits and quotas
 - log redaction and optional before-forward redaction
 - Prometheus metrics
+- privacy-aware routing policy
+- metadata-only audit logs
 - Kubernetes examples with private backend Services
 - vLLM and SGLang Compose examples
 - access-log modes
@@ -101,6 +106,16 @@ Send a request:
 curl http://127.0.0.1:8080/v1/chat/completions \
   -H 'Authorization: Bearer example-team-a-key' \
   -H 'Content-Type: application/json' \
+  -d '{"model":"qwen-local","messages":[{"role":"user","content":"hello"}],"max_tokens":32}'
+```
+
+Request a stricter privacy class with either `X-Privacy-Class` or a JSON `privacy_class` field:
+
+```sh
+curl http://127.0.0.1:8080/v1/chat/completions \
+  -H 'Authorization: Bearer example-team-a-key' \
+  -H 'Content-Type: application/json' \
+  -H 'X-Privacy-Class: restricted' \
   -d '{"model":"qwen-local","messages":[{"role":"user","content":"hello"}],"max_tokens":32}'
 ```
 
@@ -167,6 +182,22 @@ Minimal shape:
   ],
   "privacy": {
     "access_log": "metadata"
+  },
+  "policy": {
+    "default_privacy_class": "standard",
+    "tenants": [
+      {
+        "tenant": "team-a",
+        "allowed_models": ["qwen-local"],
+        "allowed_backends": ["vllm-local"],
+        "privacy_classes": ["standard", "sensitive", "restricted"]
+      }
+    ],
+    "routing_rules": [
+      {"tenant": "team-a", "model": "qwen-local", "privacy_class": "standard", "backend": "vllm-local"},
+      {"tenant": "team-a", "model": "qwen-local", "privacy_class": "sensitive", "backend": "vllm-local"},
+      {"tenant": "team-a", "model": "qwen-local", "privacy_class": "restricted", "backend": "vllm-local"}
+    ]
   }
 }
 ```
@@ -175,9 +206,17 @@ Important config rules:
 
 - API keys can be read from environment variables with `key_env`.
 - Each route must declare model names and allowed endpoints.
+- Set route `local` to `false` for external providers. `sensitive` and `restricted` policy rules cannot use those routes.
+- When `policy` is configured, each tenant must have model, backend, and privacy-class allowlists.
 - Requests for unknown models fail before forwarding.
 - Requests to non-allowlisted paths return `403`.
 - Real secrets should not be committed.
+
+Validate policy and config before deployment:
+
+```sh
+python3 -m gateway validate-policy --config config/gateway.dev.json
+```
 
 ## TLS And mTLS
 
@@ -236,7 +275,7 @@ The gateway prints colored access logs to the terminal. If `logging.file` or `--
 Access-log modes:
 
 - `off`: no access logs.
-- `metadata`: safe default; logs request ID, tenant, route, backend, model, status, latency, and token counts when available.
+- `metadata`: safe default; logs request ID, tenant, route, backend, model, privacy class, status, latency, and token counts when available.
 - `all`: debug mode; logs metadata plus request and response bodies. This can include prompts and completions, so use it only in local development.
 
 Authorization headers, cookies, and API keys are not logged in any mode.
@@ -244,7 +283,7 @@ Authorization headers, cookies, and API keys are not logged in any mode.
 Example:
 
 ```json
-{"request_id":"req_abc","tenant":"team-a","route":"/v1/chat/completions","backend":"vllm-local","model":"qwen-local","status":200,"latency_ms":84,"input_tokens":12,"output_tokens":8}
+{"request_id":"req_abc","tenant":"team-a","route":"/v1/chat/completions","backend":"vllm-local","model":"qwen-local","privacy_class":"restricted","status":200,"latency_ms":84,"input_tokens":12,"output_tokens":8}
 ```
 
 Config:
@@ -252,7 +291,9 @@ Config:
 ```json
 {
   "privacy": {
-    "access_log": "metadata"
+    "access_log": "metadata",
+    "audit_log_file": "logs/audit.log",
+    "audit_retention_days": 30
   },
   "logging": {
     "color": "always",
@@ -262,6 +303,8 @@ Config:
 ```
 
 Color modes are `auto`, `always`, and `never`. File logs never include ANSI color codes.
+
+Audit logs are always metadata-only and never include prompt or completion bodies.
 
 ## Development
 
@@ -294,7 +337,7 @@ idea.md              research notes
 ## Roadmap
 
 - Phase 2: implemented dynamic API key issuance/modification/revocation, mTLS settings, JWT/OIDC hooks, per-tenant rate limits, redaction middleware, Kubernetes templates, and safe metrics.
-- Phase 3: privacy classes, tenant-to-backend routing, local-only routing, and policy validation.
+- Phase 3: implemented privacy classes, tenant-to-backend routing, local-only routing, metadata-only audit logs, and policy validation.
 - Phase 4: service-mesh examples, confidential-computing notes, attestation experiments, signed policies, and security CI.
 
 ## Security Limits

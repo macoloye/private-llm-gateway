@@ -18,6 +18,7 @@
     {
       "name": "stub-backend",
       "backend": "http://127.0.0.1:1",
+      "local": true,
       "models": ["test-model"],
       "allowed_endpoints": [
         {"path": "/v1/chat/completions", "methods": ["POST"]},
@@ -27,7 +28,23 @@
       ]
     }
   ],
-  "privacy": {"access_log": "metadata"},
+  "privacy": {"access_log": "metadata", "audit_retention_days": 30},
+  "policy": {
+    "default_privacy_class": "standard",
+    "tenants": [
+      {
+        "tenant": "test-tenant",
+        "allowed_models": ["test-model"],
+        "allowed_backends": ["stub-backend"],
+        "privacy_classes": ["standard", "sensitive", "restricted"]
+      }
+    ],
+    "routing_rules": [
+      {"tenant": "test-tenant", "model": "test-model", "privacy_class": "standard", "backend": "stub-backend"},
+      {"tenant": "test-tenant", "model": "test-model", "privacy_class": "sensitive", "backend": "stub-backend"},
+      {"tenant": "test-tenant", "model": "test-model", "privacy_class": "restricted", "backend": "stub-backend"}
+    ]
+  },
   "logging": {"color": "never"},
   "limits": {
     "max_request_body_bytes": 1048576,

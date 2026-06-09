@@ -9,7 +9,7 @@ DEFAULT_RULES: tuple[tuple[str, str], ...] = (
     ("bearer_token", r"(?i)\bbearer\s+[a-z0-9._~+/=-]{12,}"),
     ("api_key", r"\b(?:sk|pig)_[A-Za-z0-9_-]{16,}\b"),
     ("pem_block", r"-----BEGIN [A-Z ]+-----.*?-----END [A-Z ]+-----"),
-    ("password", r"(?i)\b(password|passwd|pwd)\s*[:=]\s*[^\s,;]+"),
+    ("password", r"(?i)\b(password|passwd|pwd)\s*[:=]\s*[^\s,;\"'{}\[\]]+"),
     ("email", r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"),
     ("ssn", r"\b\d{3}-\d{2}-\d{4}\b"),
     ("credit_card", r"\b(?:\d[ -]*?){13,19}\b"),
