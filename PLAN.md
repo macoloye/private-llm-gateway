@@ -50,7 +50,7 @@ deploy/compose/      runnable local vLLM and SGLang stacks
 deploy/k8s/          Kubernetes manifests and hardening overlays
 scripts/pki/         development CA and certificate generation
 benchmarks/          privacy-control overhead tests
-docs/                threat model, hardening, comparison, operations notes
+docs/                configuration, threat model, hardening, comparison, operations notes
 tests/               unit and integration tests
 ```
 

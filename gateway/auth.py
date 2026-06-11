@@ -137,7 +137,8 @@ class JWTVerifier:
         self.config = config
         self._mtime_ns: int | None = None
         self._keys: dict[str, bytes] = {}
-        self._load_keys(force=True)
+        if self.config.enabled:
+            self._load_keys(force=True)
 
     def verify(self, token: str) -> Principal | None:
         if not self.config.enabled:

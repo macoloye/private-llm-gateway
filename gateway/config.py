@@ -286,12 +286,15 @@ def _parse_api_key(raw: dict[str, Any]) -> APIKey:
     tenant = str(raw.get("tenant", key_id)).strip()
     secret = raw.get("key")
     secret_hash = raw.get("key_hash")
-    if not secret and raw.get("key_env"):
-        secret = os.environ.get(str(raw["key_env"]))
     if not key_id:
         raise ConfigError("auth.api_keys[].id is required")
     if not tenant:
         raise ConfigError(f"auth.api_keys[{key_id}].tenant is required")
+    if not secret and raw.get("key_env"):
+        key_env = str(raw["key_env"])
+        secret = os.environ.get(key_env)
+        if not secret and not secret_hash:
+            raise ConfigError(f"auth.api_keys[{key_id}].key_env {key_env} is not set")
     if not secret and not secret_hash:
         raise ConfigError(f"auth.api_keys[{key_id}] must set key, key_env, or key_hash")
     return APIKey(

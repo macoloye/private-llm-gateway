@@ -228,9 +228,11 @@ The backend services use Docker `expose`, not host `ports`, so only the gateway
 is published to the host. This is intentional: clients should talk to the gateway
 only.
 
-## Configuration
+## Configuration And Authentication
 
 The development config lives at [config/gateway.dev.json](config/gateway.dev.json).
+Detailed configuration, authentication, backend API-key, TLS, limits, and logging
+instructions live in [docs/configuration.md](docs/configuration.md).
 
 Validate the config and routing policy before deployment:
 
@@ -238,292 +240,15 @@ Validate the config and routing policy before deployment:
 python3 -m gateway validate-policy --config config/gateway.dev.json
 ```
 
-Minimal config shape:
+Configuration selection:
 
-```json
-{
-  "server": {
-    "host": "0.0.0.0",
-    "port": 8080,
-    "tls": {
-      "enabled": false,
-      "cert_file": "certs/server.crt",
-      "key_file": "certs/server.key"
-    }
-  },
-  "auth": {
-    "api_keys": [
-      {
-        "id": "team-a",
-        "tenant": "team-a",
-        "key_env": "TEAM_A_API_KEY",
-        "allowed_models": ["qwen-local"]
-      }
-    ]
-  },
-  "routes": [
-    {
-      "name": "vllm-local",
-      "backend": "http://vllm:8000",
-      "local": true,
-      "models": ["qwen-local"],
-      "allowed_endpoints": [
-        {"path": "/v1/chat/completions", "methods": ["POST"]},
-        {"path": "/v1/models", "methods": ["GET"]}
-      ]
-    }
-  ],
-  "privacy": {
-    "access_log": "metadata"
-  },
-  "policy": {
-    "default_privacy_class": "standard",
-    "tenants": [
-      {
-        "tenant": "team-a",
-        "allowed_models": ["qwen-local"],
-        "allowed_backends": ["vllm-local"],
-        "privacy_classes": ["standard", "sensitive", "restricted"]
-      }
-    ],
-    "routing_rules": [
-      {
-        "tenant": "team-a",
-        "model": "qwen-local",
-        "privacy_class": "standard",
-        "backend": "vllm-local"
-      },
-      {
-        "tenant": "team-a",
-        "model": "qwen-local",
-        "privacy_class": "sensitive",
-        "backend": "vllm-local"
-      },
-      {
-        "tenant": "team-a",
-        "model": "qwen-local",
-        "privacy_class": "restricted",
-        "backend": "vllm-local"
-      }
-    ]
-  }
-}
-```
+- `auth`: credentials accepted from gateway clients.
+- `routes[].backend_api_key_env`: credentials sent from the gateway to a backend.
+- `policy`: tenant, model, backend, privacy-class, and routing rules.
+- `limits`: body size, generation limits, timeout, and tenant quotas.
+- `privacy` and `logging`: metadata-only logs, audit logs, and redaction behavior.
 
-Important config rules:
-
-- Configure at least one auth source: `auth.api_keys`, `auth.api_key_file`, or enabled JWT.
-- Static API keys can read secrets from environment variables with `key_env`.
-- Dynamic API keys are stored as PBKDF2 hashes when `auth.api_key_file` is configured.
-- Each route must declare model names and allowed endpoints.
-- Set route `local` to `false` for external providers.
-- `sensitive` and `restricted` traffic cannot use external routes.
-- When `policy` is configured, each tenant should have model, backend, and privacy-class allowlists.
-- `routing_rules` choose the exact backend for a tenant, model, and privacy class.
-- If no matching routing rule exists, the gateway chooses the first allowed route that can serve the model.
-- Real secrets should not be committed.
-
-## Authentication
-
-### Static API Keys
-
-Static API keys are configured in `auth.api_keys`. A key can be stored directly
-with `key`, read from an environment variable with `key_env`, or stored as a hash
-with `key_hash`.
-
-Example:
-
-```json
-{
-  "auth": {
-    "api_keys": [
-      {
-        "id": "team-a",
-        "tenant": "team-a",
-        "key_env": "TEAM_A_API_KEY",
-        "allowed_models": ["qwen-local"]
-      }
-    ]
-  }
-}
-```
-
-Clients can send the key as either:
-
-```text
-Authorization: Bearer <key>
-```
-
-or:
-
-```text
-X-Api-Key: <key>
-```
-
-### Dynamic Hashed API Keys
-
-For production-style key management, configure:
-
-```json
-{
-  "auth": {
-    "api_key_file": "config/api-keys.local.json",
-    "admin_api_key_env": "GATEWAY_ADMIN_API_KEY"
-  }
-}
-```
-
-Then set the admin key and use the protected admin endpoint:
-
-```sh
-export GATEWAY_ADMIN_API_KEY=replace-with-admin-secret
-
-curl http://127.0.0.1:8080/admin/api-keys \
-  -H 'Authorization: Bearer replace-with-admin-secret' \
-  -H 'Content-Type: application/json' \
-  -d '{"action":"issue","id":"team-b","tenant":"team-b","allowed_models":["qwen-local"]}'
-```
-
-Supported actions:
-
-- `issue`: create a new key and return the plaintext once.
-- `rotate`: replace an existing key and return the new plaintext once.
-- `update`: update tenant, allowed models, or revoked status.
-- `revoke`: mark a key as revoked.
-
-The gateway reloads the key file when it changes. If the key file contains
-invalid records, dynamic keys are rejected.
-
-### JWT
-
-JWT auth is configured with `auth.jwt.enabled`, `issuer`, `audience`, and a local
-JWKS file. The current stdlib verifier supports HS256 `oct` JWKS keys. OIDC
-discovery fields are parsed as integration hooks for deployments that resolve
-JWKS externally.
-
-## TLS And mTLS
-
-Generate local development certificates:
-
-```sh
-scripts/pki/dev-ca.sh
-```
-
-Then set `server.tls.enabled` to `true` and keep `cert_file` and `key_file`
-pointed at the generated files.
-
-For service-to-service client certificates, configure the server TLS block:
-
-```json
-{
-  "server": {
-    "tls": {
-      "enabled": true,
-      "cert_file": "certs/server.crt",
-      "key_file": "certs/server.key",
-      "client_ca_file": "certs/dev-ca.crt",
-      "require_client_cert": true
-    }
-  }
-}
-```
-
-For gateway-to-backend HTTPS or mTLS, use an `https://` backend URL and route
-level TLS files:
-
-```json
-{
-  "routes": [
-    {
-      "name": "vllm-secure",
-      "backend": "https://vllm:8443",
-      "tls_ca_file": "certs/dev-ca.crt",
-      "tls_cert_file": "certs/client.crt",
-      "tls_key_file": "certs/client.key",
-      "models": ["qwen-local"],
-      "allowed_endpoints": [
-        {"path": "/v1/chat/completions", "methods": ["POST"]}
-      ]
-    }
-  ]
-}
-```
-
-## Limits
-
-The `limits` block controls basic request and backend protections:
-
-```json
-{
-  "limits": {
-    "max_request_body_bytes": 1048576,
-    "max_output_tokens": 2048,
-    "max_n": 4,
-    "timeout_seconds": 120,
-    "per_tenant_requests_per_minute": 120,
-    "per_tenant_requests_per_day": 10000
-  }
-}
-```
-
-Limit behavior:
-
-- Bodies larger than `max_request_body_bytes` return `413`.
-- `max_tokens` above `max_output_tokens` returns `400`.
-- `n` above `max_n` returns `400`.
-- Backend requests that exceed `timeout_seconds` return `504`.
-- Tenant quota failures return `429`.
-- Per-tenant quota values of `0` disable that quota.
-
-## Logs
-
-The gateway prints access logs to the terminal. If `logging.file` or `--log-file`
-is set, it also writes JSON lines to a `.log` file.
-
-Override logging from the CLI:
-
-```sh
-python3 -m gateway \
-  --config config/gateway.dev.json \
-  --log-file logs/gateway.log \
-  --color always
-```
-
-Access-log modes:
-
-- `off`: no access logs.
-- `metadata`: safe default; logs request ID, tenant, route, backend, model,
-  privacy class, status, latency, and token counts when available.
-- `all`: debug mode; logs metadata plus request and response bodies. This can
-  include prompts and completions, so use it only in local development.
-
-Authorization headers, cookies, and API keys are not logged in any mode.
-
-Example metadata log:
-
-```json
-{"request_id":"req_abc","tenant":"team-a","route":"/v1/chat/completions","backend":"vllm-local","model":"qwen-local","privacy_class":"restricted","status":200,"latency_ms":84,"input_tokens":12,"output_tokens":8}
-```
-
-Config:
-
-```json
-{
-  "privacy": {
-    "access_log": "metadata",
-    "audit_log_file": "logs/audit.log",
-    "audit_retention_days": 30
-  },
-  "logging": {
-    "color": "always",
-    "file": "logs/gateway.log"
-  }
-}
-```
-
-Color modes are `auto`, `always`, and `never`. File logs never include ANSI color
-codes. Audit logs are always metadata-only and never include prompt or completion
-bodies.
+Do not commit real secrets.
 
 ## Metrics
 
@@ -567,6 +292,7 @@ Repository layout:
 ```text
 gateway/             gateway runtime
 config/              JSON configs
+docs/                configuration and operations notes
 deploy/compose/      vLLM and SGLang Compose examples
 deploy/k8s/          gateway, private backend Service, and NetworkPolicy examples
 scripts/pki/         local certificate helper

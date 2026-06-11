@@ -272,6 +272,20 @@ class GatewayTest(unittest.TestCase):
         self.assertTrue(config.auth.oidc.enabled)
         self.assertEqual(config.auth.oidc.client_id, "gateway")
 
+    def test_config_reports_unset_api_key_env(self) -> None:
+        raw = dict(self.config_raw)
+        raw["auth"] = {
+            "api_keys": [
+                {
+                    "id": "team-a",
+                    "tenant": "team-a",
+                    "key_env": "TEST_TEAM_A_API_KEY_UNSET",
+                }
+            ]
+        }
+        with self.assertRaisesRegex(ValueError, "auth.api_keys\\[team-a\\].key_env TEST_TEAM_A_API_KEY_UNSET is not set"):
+            parse_config(raw)
+
     def test_config_rejects_unknown_access_log_mode(self) -> None:
         raw = dict(self.config_raw)
         raw["privacy"] = {"access_log": "verbose"}
@@ -866,6 +880,28 @@ class GatewayTest(unittest.TestCase):
             self.assertIsNone(verifier.verify(wrong_audience))
             self.assertIsNone(verifier.verify(expired))
             self.assertIsNone(verifier.verify(unknown_key))
+
+    def test_disabled_jwt_does_not_require_jwks_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            missing_jwks = Path(tmp) / "missing-jwks.json"
+            config = parse_config(
+                {
+                    **self.config_raw,
+                    "auth": {
+                        **self.config_raw["auth"],
+                        "jwt": {
+                            "enabled": False,
+                            "issuer": "issuer-a",
+                            "audience": "gateway",
+                            "jwks_file": str(missing_jwks),
+                        },
+                    },
+                }
+            )
+
+            verifier = JWTVerifier(config.auth.jwt)
+
+            self.assertIsNone(verifier.verify("not-a-token"))
 
     def test_jwt_auth_allows_gateway_request_with_claim_model_allowlist(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
