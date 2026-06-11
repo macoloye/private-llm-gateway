@@ -16,13 +16,13 @@
     "jwt": {
       "enabled": false,
       "issuer": "https://issuer.example.invalid",
-      "audience": "private-inference-gateway",
+      "audience": "private-llm-gateway",
       "jwks_file": "config/jwks.local.json"
     },
     "oidc": {
       "enabled": false,
       "discovery_url": "https://issuer.example.invalid/.well-known/openid-configuration",
-      "client_id": "private-inference-gateway"
+      "client_id": "private-llm-gateway"
     },
     "api_keys": [
       {

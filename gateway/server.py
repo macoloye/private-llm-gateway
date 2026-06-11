@@ -58,7 +58,7 @@ def run_gateway(config: GatewayConfig, logger: GatewayLogger | None = None) -> N
         server.socket = context.wrap_socket(server.socket, server_side=True)
 
     scheme = "https" if config.server.tls.enabled else "http"
-    logger.info(f"private-inference-gateway listening on {scheme}://{config.server.host}:{config.server.port}")
+    logger.info(f"private-llm-gateway listening on {scheme}://{config.server.host}:{config.server.port}")
     if config.logging.file:
         logger.info(f"metadata access log file: {config.logging.file}")
     try:
@@ -81,7 +81,7 @@ def make_handler(config: GatewayConfig, logger: GatewayLogger | None = None) -> 
     metrics = MetricsRegistry()
 
     class GatewayHandler(BaseHTTPRequestHandler):
-        server_version = "PrivateInferenceGateway/0.1"
+        server_version = "PrivateLLMGateway/0.1"
 
         def do_GET(self) -> None:
             self._handle()

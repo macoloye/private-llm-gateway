@@ -1,13 +1,13 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: private-inference
+  name: private-llm
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: gateway-config
-  namespace: private-inference
+  namespace: private-llm
 data:
   gateway.json: |
     {
@@ -16,7 +16,7 @@ data:
       "routes": [
         {
           "name": "vllm-private",
-          "backend": "http://vllm.private-inference.svc.cluster.local:8000",
+          "backend": "http://vllm.private-llm.svc.cluster.local:8000",
           "models": ["qwen-local"],
           "allowed_endpoints": [
             {"path": "/v1/chat/completions", "methods": ["POST"]},
@@ -41,7 +41,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: gateway
-  namespace: private-inference
+  namespace: private-llm
 spec:
   replicas: 2
   selector:
@@ -54,7 +54,7 @@ spec:
     spec:
       containers:
         - name: gateway
-          image: private-inference-gateway:local
+          image: private-llm-gateway:local
           imagePullPolicy: IfNotPresent
           args: ["--config", "/etc/gateway/gateway.json"]
           ports:
@@ -83,7 +83,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: gateway
-  namespace: private-inference
+  namespace: private-llm
 spec:
   type: LoadBalancer
   selector:

@@ -1,10 +1,10 @@
 # AGENTS.md
 
-This file gives repo-local instructions for AI coding agents working on Private Inference Gateway.
+This file gives repo-local instructions for AI coding agents working on Private LLM Gateway.
 
 ## Project Intent
 
-Private Inference Gateway is a privacy and security gateway for self-hosted LLM inference backends, especially vLLM and SGLang. Treat it as a gateway, policy, deployment, and hardening project. Do not turn it into a model-serving engine.
+Private LLM Gateway is a privacy and security gateway for self-hosted LLM inference backends, especially vLLM and SGLang. Treat it as a gateway, policy, deployment, and hardening project. Do not turn it into a model-serving engine.
 
 Use `PLAN.md` as the implementation source of truth and `README.md` as the product-facing overview. Keep both consistent in the same change whenever scope, commands, phases, or layout change.
 

@@ -1,6 +1,6 @@
-# Private Inference Gateway
+# Private LLM Gateway
 
-Private Inference Gateway is a small, privacy-focused HTTP gateway for self-hosted
+Private LLM Gateway is a small, privacy-focused HTTP gateway for self-hosted
 OpenAI-compatible inference servers such as vLLM and SGLang.
 
 It gives applications one protected OpenAI-style API endpoint while keeping the
@@ -28,7 +28,7 @@ The gateway is useful when you want to:
                          OpenAI-compatible API
                                       |
                    +------------------v------------------+
-                   |      Private Inference Gateway      |
+                   |         Private LLM Gateway         |
                    |  authn, endpoint allowlist, limits  |
                    |  routing policy, logs, request IDs  |
                    +---------------+---------------+-----+
@@ -150,7 +150,7 @@ completions, and request bodies are not metric labels.
 From the repository root:
 
 ```sh
-cd private-inference-gateway
+cd private-llm-gateway
 ```
 
 Run the test suite:
@@ -600,7 +600,7 @@ See [PLAN.md](PLAN.md) for the implementation roadmap and
 
 ## Security Limits
 
-Private Inference Gateway reduces deployment-level risk by centralizing
+Private LLM Gateway reduces deployment-level risk by centralizing
 authentication, routing policy, endpoint exposure, logging, and network
 boundaries. It is not a substitute for confidential computing, encrypted
 inference, secure hardware attestation, or a trustworthy backend.

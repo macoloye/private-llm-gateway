@@ -7,7 +7,7 @@ mkdir -p "$OUT_DIR"
 openssl req -x509 -newkey rsa:4096 -days 365 -nodes \
   -keyout "$OUT_DIR/dev-ca.key" \
   -out "$OUT_DIR/dev-ca.crt" \
-  -subj "/CN=Private Inference Gateway Dev CA"
+  -subj "/CN=Private LLM Gateway Dev CA"
 
 openssl req -newkey rsa:2048 -nodes \
   -keyout "$OUT_DIR/server.key" \
@@ -25,7 +25,7 @@ openssl x509 -req -in "$OUT_DIR/server.csr" \
 openssl req -newkey rsa:2048 -nodes \
   -keyout "$OUT_DIR/client.key" \
   -out "$OUT_DIR/client.csr" \
-  -subj "/CN=private-inference-gateway-client"
+  -subj "/CN=private-llm-gateway-client"
 
 openssl x509 -req -in "$OUT_DIR/client.csr" \
   -CA "$OUT_DIR/dev-ca.crt" \

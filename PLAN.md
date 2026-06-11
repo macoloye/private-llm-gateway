@@ -1,10 +1,10 @@
-# Private Inference Gateway Implementation Plan
+# Private LLM Gateway Implementation Plan
 
 This plan is the implementation source of truth for the early repository. Keep it aligned with `README.md`: the README explains what the project is and why it exists; this file explains what to build, in what order, and what must be true before each phase is considered complete.
 
 ## Product Scope
 
-Private Inference Gateway is a standalone privacy and security gateway for self-hosted LLM inference backends.
+Private LLM Gateway is a standalone privacy and security gateway for self-hosted LLM inference backends.
 
 Primary targets:
 

@@ -11,7 +11,7 @@ from gateway.server import run_gateway
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Run Private Inference Gateway.",
+        description="Run Private LLM Gateway.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     subparsers = parser.add_subparsers(dest="command")
